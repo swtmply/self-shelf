@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import type { FormEvent } from "react"
 import { createFileRoute } from "@tanstack/react-router"
 import {
@@ -27,6 +27,12 @@ import {
   ComboboxList,
 } from "@/components/ui/combobox"
 import { getMetadata } from "@/lib/metadata"
+import {
+  findDriveFile,
+  getDriveToken,
+  readDriveFile,
+  writeDriveFile,
+} from "@/lib/drive"
 
 export const Route = createFileRoute("/")({
   validateSearch: (search) => ({
@@ -43,6 +49,9 @@ const defaultCategories = [
   "Inspiration",
 ]
 const storageKey = "read-later.collection"
+const syncFileKey = "read-later.sync-file"
+const syncSnapshotKey = "read-later.sync-snapshot"
+const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID
 
 type Bookmark = {
   id: string
@@ -55,6 +64,139 @@ type Bookmark = {
 
 type Collection = { bookmarks: Bookmark[]; categories: string[] }
 
+function bookmarkUrl(bookmark: Bookmark) {
+  return new URL(bookmark.url).href
+}
+
+function sameBookmark(current: Bookmark, imported: Bookmark) {
+  return (
+    bookmarkUrl(current) === bookmarkUrl(imported) &&
+    current.title === imported.title &&
+    current.description === imported.description &&
+    current.image === imported.image &&
+    current.category === imported.category
+  )
+}
+
+function uniqueBookmarks(bookmarks: Bookmark[]) {
+  const urls = new Set<string>()
+  return bookmarks.filter((bookmark) => {
+    const url = bookmarkUrl(bookmark)
+    if (urls.has(url)) return false
+    urls.add(url)
+    return true
+  })
+}
+
+type ImportRow =
+  | { kind: "changed"; url: string; current: Bookmark; imported: Bookmark }
+  | { kind: "new"; url: string; imported: Bookmark }
+  | { kind: "current"; url: string; current: Bookmark }
+
+function compareCollections(local: Collection, incoming: Collection) {
+  const current = uniqueBookmarks(local.bookmarks)
+  const imported = uniqueBookmarks(incoming.bookmarks)
+  const currentUrls = new Set(current.map(bookmarkUrl))
+  const importedByUrl = new Map(
+    imported.map((bookmark) => [bookmarkUrl(bookmark), bookmark])
+  )
+  const rows: ImportRow[] = []
+
+  for (const bookmark of current) {
+    const url = bookmarkUrl(bookmark)
+    const match = importedByUrl.get(url)
+    if (match) {
+      if (!sameBookmark(bookmark, match))
+        rows.push({ kind: "changed", url, current: bookmark, imported: match })
+    } else {
+      rows.push({ kind: "current", url, current: bookmark })
+    }
+  }
+  for (const bookmark of imported) {
+    const url = bookmarkUrl(bookmark)
+    if (!currentUrls.has(url))
+      rows.push({ kind: "new", url, imported: bookmark })
+  }
+  return rows
+}
+
+function mergeCollections(
+  local: Collection,
+  incoming: Collection,
+  choices: Record<string, "current" | "imported">
+): Collection {
+  const current = uniqueBookmarks(local.bookmarks)
+  const imported = uniqueBookmarks(incoming.bookmarks)
+  const currentUrls = new Set(current.map(bookmarkUrl))
+  const importedByUrl = new Map(
+    imported.map((bookmark) => [bookmarkUrl(bookmark), bookmark])
+  )
+  const bookmarks = current.flatMap((bookmark) => {
+    const url = bookmarkUrl(bookmark)
+    const match = importedByUrl.get(url)
+    if (!match && choices[url] === "imported") return []
+    return [
+      match && choices[url] === "imported"
+        ? { ...match, id: bookmark.id }
+        : bookmark,
+    ]
+  })
+  const ids = new Set(bookmarks.map((bookmark) => bookmark.id))
+  for (const bookmark of imported) {
+    if (currentUrls.has(bookmarkUrl(bookmark))) continue
+    const added = ids.has(bookmark.id)
+      ? { ...bookmark, id: crypto.randomUUID() }
+      : bookmark
+    bookmarks.push(added)
+    ids.add(added.id)
+  }
+  return {
+    bookmarks,
+    categories: [...new Set([...local.categories, ...incoming.categories])],
+  }
+}
+
+function isBookmark(value: unknown): value is Bookmark {
+  if (!value || typeof value !== "object") return false
+  if (
+    !("id" in value && typeof value.id === "string") ||
+    !("url" in value && typeof value.url === "string") ||
+    !("title" in value && typeof value.title === "string") ||
+    !("description" in value && typeof value.description === "string") ||
+    !("image" in value && typeof value.image === "string") ||
+    !("category" in value && typeof value.category === "string")
+  )
+    return false
+  try {
+    return ["http:", "https:"].includes(new URL(value.url).protocol)
+  } catch {
+    return false
+  }
+}
+
+function isCollection(value: unknown): value is Collection {
+  if (!value || typeof value !== "object") return false
+  if (!("categories" in value) || !("bookmarks" in value)) return false
+  if (!Array.isArray(value.categories) || !Array.isArray(value.bookmarks))
+    return false
+  const categories: unknown[] = value.categories
+  const bookmarks: unknown[] = value.bookmarks
+  if (
+    !categories.every(
+      (item): item is string =>
+        typeof item === "string" && item.trim().length > 0
+    ) ||
+    !bookmarks.every(isBookmark)
+  )
+    return false
+  return (
+    categories.length > 0 &&
+    new Set(categories).size === categories.length &&
+    bookmarks.every((item) => categories.includes(item.category)) &&
+    new Set(bookmarks.map((item) => item.id)).size === bookmarks.length
+  )
+}
+
 function Icon({ icon, size = 20 }: { icon: typeof Add01Icon; size?: number }) {
   return (
     <HugeiconsIcon
@@ -66,6 +208,40 @@ function Icon({ icon, size = 20 }: { icon: typeof Add01Icon; size?: number }) {
   )
 }
 
+function ImportBookmarkCard({
+  bookmark,
+  imported,
+}: {
+  bookmark: Bookmark
+  imported: boolean
+}) {
+  return (
+    <div
+      className={`min-w-0 rounded-lg border p-3 text-xs ${imported ? "border-[#a8d5ae] bg-[#edf8ed]" : "border-[#e6b0aa] bg-[#fff0ee]"}`}
+    >
+      {bookmark.image && (
+        <img
+          className="mb-2 h-24 w-full rounded-md object-cover"
+          src={bookmark.image}
+          alt=""
+          loading="lazy"
+          onError={(event) => {
+            event.currentTarget.style.display = "none"
+          }}
+        />
+      )}
+      <span className="font-semibold">{bookmark.category}</span>
+      <h3 className="mt-1 font-bold break-words">
+        {bookmark.title || bookmark.url}
+      </h3>
+      {bookmark.description && (
+        <p className="mt-1 break-words">{bookmark.description}</p>
+      )}
+      <p className="mt-2 break-all opacity-70">{bookmark.url}</p>
+    </div>
+  )
+}
+
 function App() {
   const { category: categoryParam } = Route.useSearch()
   const navigate = Route.useNavigate()
@@ -73,7 +249,21 @@ function App() {
     bookmarks: [],
     categories: defaultCategories,
   })
+  const collectionRef = useRef(collection)
+  collectionRef.current = collection
+  const importInputRef = useRef<HTMLInputElement>(null)
+  const importDialogRef = useRef<HTMLDialogElement>(null)
   const [ready, setReady] = useState(false)
+  const [importing, setImporting] = useState(false)
+  const [pendingImport, setPendingImport] = useState<{
+    fileName: string
+    collection: Collection
+  } | null>(null)
+  const [importChoices, setImportChoices] = useState<
+    Record<string, "current" | "imported">
+  >({})
+  const [syncing, setSyncing] = useState(false)
+  const [statusMessage, setStatusMessage] = useState("")
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [isMac, setIsMac] = useState(false)
   const [view, setView] = useState<"grid" | "list">("grid")
@@ -86,19 +276,14 @@ function App() {
 
   useEffect(() => {
     try {
-      const stored = JSON.parse(
+      const stored: unknown = JSON.parse(
         localStorage.getItem(storageKey) ?? "null"
-      ) as Partial<Collection> | null
-      if (
-        stored &&
-        Array.isArray(stored.bookmarks) &&
-        Array.isArray(stored.categories)
-      ) {
+      )
+      if (isCollection(stored))
         setCollection({
-          bookmarks: stored.bookmarks,
-          categories: stored.categories,
+          ...stored,
+          bookmarks: uniqueBookmarks(stored.bookmarks),
         })
-      }
     } catch {
       /* Start with an empty collection if saved data is invalid. */
     }
@@ -108,6 +293,11 @@ function App() {
   useEffect(() => {
     if (ready) localStorage.setItem(storageKey, JSON.stringify(collection))
   }, [collection, ready])
+
+  useEffect(() => {
+    if (pendingImport && !importDialogRef.current?.open)
+      importDialogRef.current?.showModal()
+  }, [pendingImport])
 
   useEffect(() => {
     setIsMac(/Mac|iPhone|iPad/.test(navigator.platform))
@@ -141,6 +331,9 @@ function App() {
   const visible = collection.bookmarks.filter(
     (bookmark) => category === "All bookmarks" || bookmark.category === category
   )
+  const importDiff = pendingImport
+    ? compareCollections(collection, pendingImport.collection)
+    : []
 
   function selectCategory(name: string, replace = false) {
     setSidebarOpen(false)
@@ -248,6 +441,139 @@ function App() {
       bookmarks: current.bookmarks.filter((item) => item.id !== id),
     }))
     setOpenMenu(null)
+  }
+
+  function exportCollection() {
+    const url = URL.createObjectURL(
+      new Blob([JSON.stringify(collection, null, 2)], {
+        type: "application/json",
+      })
+    )
+    const link = document.createElement("a")
+    link.href = url
+    link.download = "self-shelf.json"
+    link.click()
+    setTimeout(() => URL.revokeObjectURL(url), 0)
+  }
+
+  async function importCollection(file: File) {
+    setImporting(true)
+    setStatusMessage("")
+    try {
+      const imported: unknown = JSON.parse(await file.text())
+      if (!isCollection(imported))
+        throw new Error("Choose a valid Self Shelf JSON backup.")
+      if (!compareCollections(collectionRef.current, imported).length) {
+        const next = mergeCollections(collectionRef.current, imported, {})
+        const removed =
+          collectionRef.current.bookmarks.length - next.bookmarks.length
+        setCollection(next)
+        setStatusMessage(
+          removed
+            ? `Removed ${removed} duplicate ${removed === 1 ? "link" : "links"}.`
+            : "No bookmark differences found."
+        )
+        return
+      }
+      setImportChoices({})
+      setPendingImport({ fileName: file.name, collection: imported })
+    } catch (error) {
+      setStatusMessage(
+        error instanceof SyntaxError
+          ? "Choose a valid Self Shelf JSON backup."
+          : error instanceof Error
+            ? error.message
+            : "Import failed."
+      )
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  function finishImport() {
+    if (!pendingImport) return
+    const next = mergeCollections(
+      collection,
+      pendingImport.collection,
+      importChoices
+    )
+    setCollection(next)
+    setCategoryForm(null)
+    selectCategory("All bookmarks", true)
+    setStatusMessage(`Imported collection: ${next.bookmarks.length} bookmarks.`)
+    importDialogRef.current?.close()
+    setPendingImport(null)
+  }
+
+  async function syncNow() {
+    if (syncing || importing || pendingImport || !ready) return
+    setSyncing(true)
+    setStatusMessage("")
+    try {
+      if (!googleClientId)
+        throw new Error("Google Drive sync is not configured yet.")
+      const local = JSON.stringify(collection)
+      const token = await getDriveToken(googleClientId)
+      const fileId = await findDriveFile(token)
+      const remoteValue = fileId ? await readDriveFile(token, fileId) : null
+      if (fileId && !isCollection(remoteValue))
+        throw new Error("The Google Drive sync file has invalid data.")
+      const remote = remoteValue ? JSON.stringify(remoteValue) : null
+      const baseline =
+        fileId && localStorage.getItem(syncFileKey) === fileId
+          ? localStorage.getItem(syncSnapshotKey)
+          : null
+
+      if (JSON.stringify(collectionRef.current) !== local)
+        throw new Error("Your collection changed during sync. Try again.")
+
+      let useDrive = false
+      let useLocal = !fileId || remote === local || remote === baseline
+      if (fileId && remote !== local && !useLocal) {
+        if (
+          local === baseline ||
+          (baseline === null && collection.bookmarks.length === 0)
+        ) {
+          useDrive = true
+        } else if (
+          window.confirm(
+            "Both copies have changes. Use the Google Drive copy and replace this device’s collection?"
+          )
+        ) {
+          useDrive = true
+        } else {
+          useLocal = window.confirm(
+            "Replace the Google Drive copy with this device’s collection? Cancel keeps both copies unchanged."
+          )
+        }
+      }
+
+      let savedFileId = fileId
+      if (useDrive && remoteValue && isCollection(remoteValue) && remote) {
+        localStorage.setItem(storageKey, remote)
+        setCollection(remoteValue)
+      } else if (useLocal && remote !== local) {
+        savedFileId = await writeDriveFile(token, local, fileId)
+      } else if (!useLocal) {
+        setStatusMessage("Sync canceled. Both copies were kept.")
+        return
+      }
+
+      const synced = useDrive ? remote : local
+      if (synced && savedFileId) {
+        localStorage.setItem(syncFileKey, savedFileId)
+        localStorage.setItem(syncSnapshotKey, synced)
+      }
+      setStatusMessage(
+        useDrive ? "Updated from Google Drive." : "Synced with Google Drive."
+      )
+    } catch (error) {
+      setStatusMessage(
+        error instanceof Error ? error.message : "Drive sync failed."
+      )
+    } finally {
+      setSyncing(false)
+    }
   }
 
   const categoryEditor = (
@@ -409,7 +735,7 @@ function App() {
 
       <main className="min-w-0">
         <div className="mx-auto max-w-[1500px] px-[60px] pt-8 pb-20 max-[1120px]:px-9 max-[1120px]:pt-7 max-[1120px]:pb-[70px] max-[760px]:px-5 max-[760px]:pt-6 max-[760px]:pb-[60px]">
-          <div className="mb-7 h-9">
+          <div className="mb-7 flex min-h-9 items-center gap-2">
             {!sidebarOpen && (
               <Button
                 className="size-9 border-[#e8ede6] bg-white text-[#44744e] shadow-sm hover:bg-[#eaf1e8]"
@@ -423,7 +749,53 @@ function App() {
                 <Icon icon={Menu01Icon} size={21} />
               </Button>
             )}
+            <div className="ml-auto flex items-center gap-2">
+              <input
+                ref={importInputRef}
+                className="hidden"
+                type="file"
+                accept=".json,application/json"
+                aria-label="Import collection backup"
+                onChange={(event) => {
+                  const file = event.currentTarget.files?.[0]
+                  event.currentTarget.value = ""
+                  if (file) void importCollection(file)
+                }}
+              />
+              <button
+                className="min-h-9 rounded-lg border border-[#e8ede6] bg-white px-3 text-xs font-semibold text-[#44744e] shadow-sm hover:bg-[#eaf1e8] focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-[#a6c8a6] disabled:cursor-wait disabled:opacity-60"
+                onClick={() => importInputRef.current?.click()}
+                disabled={syncing || importing || !!pendingImport || !ready}
+              >
+                {importing ? "Importing..." : "Import"}
+              </button>
+              <button
+                className="min-h-9 rounded-lg border border-[#e8ede6] bg-white px-3 text-xs font-semibold text-[#44744e] shadow-sm hover:bg-[#eaf1e8] focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-[#a6c8a6] disabled:opacity-60"
+                onClick={exportCollection}
+                disabled={!ready}
+              >
+                Export
+              </button>
+              <button
+                className="min-h-9 rounded-lg border border-[#e8ede6] bg-white px-3 text-xs font-semibold text-[#44744e] shadow-sm hover:bg-[#eaf1e8] focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-[#a6c8a6] disabled:cursor-wait disabled:opacity-60"
+                onClick={syncNow}
+                disabled={
+                  syncing ||
+                  importing ||
+                  !!pendingImport ||
+                  !ready ||
+                  !googleClientId
+                }
+              >
+                {syncing ? "Syncing..." : "Sync now"}
+              </button>
+            </div>
           </div>
+          {statusMessage && (
+            <p className="mb-4 text-right text-xs text-[#4b7858]" role="status">
+              {statusMessage}
+            </p>
+          )}
           <div className="flex items-end justify-between gap-5 max-[540px]:flex-col max-[540px]:items-stretch">
             <div>
               <h1 className="m-0 text-[clamp(30px,3.2vw,43px)] leading-[1.15] font-bold tracking-[-1.9px] text-[#26382b] max-[540px]:text-[32px]">
@@ -598,6 +970,138 @@ function App() {
           )}
         </div>
       </main>
+      <dialog
+        ref={importDialogRef}
+        className="m-auto max-h-[90vh] w-[min(960px,calc(100vw-32px))] rounded-2xl border border-[#dce6dc] bg-white p-6 text-[#28392d] shadow-[0_20px_70px_#14241940] backdrop:bg-[#14241980] max-[540px]:p-4"
+        aria-labelledby="import-title"
+        onCancel={() => setStatusMessage("Import canceled.")}
+        onClose={() => setPendingImport(null)}
+      >
+        {pendingImport && (
+          <>
+            <h2 id="import-title" className="mb-1 text-2xl font-bold">
+              Review imported data
+            </h2>
+            <p className="mb-5 text-xs text-[#718174]">
+              Compare this collection with {pendingImport.fileName}. Matching
+              links with no changes are hidden.
+            </p>
+            <div className="max-h-[58vh] overflow-auto rounded-xl border border-[#e4eae2]">
+              <table className="w-full min-w-[700px] table-fixed border-collapse text-left text-xs">
+                <thead className="sticky top-0 bg-white shadow-sm">
+                  <tr>
+                    <th scope="col" className="w-[38%] p-3 text-[#a4514b]">
+                      Current
+                    </th>
+                    <th scope="col" className="w-[38%] p-3 text-[#39734b]">
+                      Imported
+                    </th>
+                    <th scope="col" className="w-[24%] p-3">
+                      Action
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {importDiff.map((row, index) => (
+                    <tr
+                      key={row.url}
+                      className="border-t border-[#e4eae2] align-top"
+                    >
+                      <td className="p-2">
+                        {row.kind !== "new" && (
+                          <ImportBookmarkCard
+                            bookmark={row.current}
+                            imported={false}
+                          />
+                        )}
+                      </td>
+                      <td className="p-2">
+                        {row.kind !== "current" && (
+                          <ImportBookmarkCard
+                            bookmark={row.imported}
+                            imported
+                          />
+                        )}
+                      </td>
+                      <td className="p-2">
+                        {row.kind === "new" ? (
+                          <span className="block p-2 text-[#718174]">
+                            Added automatically
+                          </span>
+                        ) : (
+                          <fieldset className="space-y-2 p-2">
+                            <legend className="sr-only">
+                              Choose version for{" "}
+                              {row.current.title || row.current.url}
+                            </legend>
+                            <label className="flex cursor-pointer items-center gap-2">
+                              <input
+                                type="radio"
+                                name={`import-choice-${index}`}
+                                checked={
+                                  (importChoices[row.url] ?? "current") ===
+                                  "current"
+                                }
+                                onChange={() =>
+                                  setImportChoices((choices) => ({
+                                    ...choices,
+                                    [row.url]: "current",
+                                  }))
+                                }
+                              />
+                              Keep current
+                            </label>
+                            <label className="flex cursor-pointer items-center gap-2">
+                              <input
+                                type="radio"
+                                name={`import-choice-${index}`}
+                                checked={importChoices[row.url] === "imported"}
+                                onChange={() =>
+                                  setImportChoices((choices) => ({
+                                    ...choices,
+                                    [row.url]: "imported",
+                                  }))
+                                }
+                              />
+                              Keep imported
+                            </label>
+                            {row.kind === "current" && (
+                              <p className="text-[11px] text-[#718174]">
+                                Keep imported removes this bookmark.
+                              </p>
+                            )}
+                          </fieldset>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="mt-4 text-xs leading-relaxed text-[#718174]">
+              New imported links are added automatically. Categories from both
+              collections are kept.
+            </p>
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <button
+                className="min-h-10 rounded-lg border border-[#e1e7de] px-4 text-xs font-bold hover:bg-[#f6f8f4] focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-[#a6c8a6]"
+                onClick={() => {
+                  setStatusMessage("Import canceled.")
+                  importDialogRef.current?.close()
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                className="min-h-10 rounded-lg bg-[#3e7950] px-4 text-xs font-bold text-white hover:bg-[#326440] focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-[#a6c8a6]"
+                onClick={finishImport}
+              >
+                Import selected
+              </button>
+            </div>
+          </>
+        )}
+      </dialog>
       {showForm && (
         <BookmarkForm
           bookmark={editing}
@@ -791,7 +1295,7 @@ function BookmarkForm({
               <ComboboxInput
                 id="bookmark-category"
                 placeholder="Choose or create a category"
-                className="w-full rounded-lg border-[#e0e8df] bg-white shadow-none focus-within:border-[#8cb596] focus-within:shadow-[0_0_0_3px_#c9dfcc55] focus-within:ring-0 has-[[data-slot=input-group-control]:focus-visible]:border-[#8cb596] has-[[data-slot=input-group-control]:focus-visible]:ring-0 has-[[data-slot=input-group-control]:focus-visible]:shadow-[0_0_0_3px_#c9dfcc55] [&_[data-slot=input-group-control]]:h-auto [&_[data-slot=input-group-control]]:py-[11px] [&_[data-slot=input-group-control]]:text-xs [&_[data-slot=input-group-control]]:text-[#354437] [&_[data-slot=input-group-control]]:placeholder:text-[#abb6ab] [&_[data-slot=input-group-control]]:focus-visible:outline-3 [&_[data-slot=input-group-control]]:focus-visible:outline-offset-2 [&_[data-slot=input-group-control]]:focus-visible:outline-[#a6c8a6] [&_[data-slot=input-group-control]]:focus-visible:ring-0 [&_button:focus-visible]:outline-3 [&_button:focus-visible]:outline-offset-2 [&_button:focus-visible]:outline-[#a6c8a6] [&_button:focus-visible]:ring-0 [&_[data-slot=combobox-trigger]]:text-[#7e927f]"
+                className="w-full rounded-lg border-[#e0e8df] bg-white shadow-none focus-within:border-[#8cb596] focus-within:shadow-[0_0_0_3px_#c9dfcc55] focus-within:ring-0 has-[[data-slot=input-group-control]:focus-visible]:border-[#8cb596] has-[[data-slot=input-group-control]:focus-visible]:shadow-[0_0_0_3px_#c9dfcc55] has-[[data-slot=input-group-control]:focus-visible]:ring-0 [&_[data-slot=combobox-trigger]]:text-[#7e927f] [&_[data-slot=input-group-control]]:h-auto [&_[data-slot=input-group-control]]:py-[11px] [&_[data-slot=input-group-control]]:text-xs [&_[data-slot=input-group-control]]:text-[#354437] [&_[data-slot=input-group-control]]:placeholder:text-[#abb6ab] [&_[data-slot=input-group-control]]:focus-visible:ring-0 [&_[data-slot=input-group-control]]:focus-visible:outline-3 [&_[data-slot=input-group-control]]:focus-visible:outline-offset-2 [&_[data-slot=input-group-control]]:focus-visible:outline-[#a6c8a6] [&_button:focus-visible]:ring-0 [&_button:focus-visible]:outline-3 [&_button:focus-visible]:outline-offset-2 [&_button:focus-visible]:outline-[#a6c8a6]"
               />
               <ComboboxContent className="border border-[#e0e8df] bg-white text-[#354437] shadow-[0_10px_24px_#243d281a]">
                 <ComboboxEmpty className="px-3 text-xs">

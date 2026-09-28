@@ -37,6 +37,7 @@ function RootDocument({ children }: { children: React.ReactNode }) {
     <html lang="en">
       <head>
         <HeadContent />
+        <script src="https://accounts.google.com/gsi/client" async defer />
       </head>
       <body className="min-h-screen bg-[#f9faf7] font-sans text-[#222723] [font-synthesis:none]">
         {children}
