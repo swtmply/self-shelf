@@ -113,7 +113,7 @@ export const getMetadata = createServerFn({ method: "POST" })
     if (!reader) return { title: "", description: "", image: "" }
     const chunks: Uint8Array[] = []
     let size = 0
-    while (size < 512_000) {
+    while (size < 1_000_000) {
       const { done, value } = await reader.read()
       if (done) break
       chunks.push(value)
