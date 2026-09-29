@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Self Shelf logo</title>
+  <rect width="256" height="256" rx="56" fill="#3e7950"/>
+  <rect x="57" y="82" width="37" height="100" rx="8" fill="#a9d1ad"/>
+  <rect x="104" y="67" width="40" height="115" rx="8" fill="#d8ebd8"/>
+  <path d="M160 65h36a8 8 0 0 1 8 8v105l-26-18-26 18V73a8 8 0 0 1 8-8Z" fill="#fff"/>
+  <path d="M54 200h148" fill="none" stroke="#fff" stroke-linecap="round" stroke-width="11"/>
+</svg>

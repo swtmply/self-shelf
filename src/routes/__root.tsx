@@ -47,6 +47,13 @@ export const Route = createRootRoute({
       ],
       links: [
         { rel: "canonical", href: pageUrl },
+        { rel: "icon", href: "/favicon.ico", type: "image/x-icon" },
+        {
+          rel: "icon",
+          href: "/self-shelf-logo.svg",
+          type: "image/svg+xml",
+          sizes: "any",
+        },
         {
           rel: "stylesheet",
           href: appCss,
