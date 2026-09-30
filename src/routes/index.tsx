@@ -848,10 +848,11 @@ function App() {
             <div
               className={`grid ${view === "list" ? "grid-cols-1 gap-[13px]" : "grid-cols-3 gap-[21px] max-[1120px]:grid-cols-2 max-[760px]:grid-cols-2 max-[540px]:grid-cols-1"}`}
             >
-              {visible.map((bookmark) => (
+              {visible.map((bookmark, index) => (
                 <article
-                  className={`group relative min-w-0 rounded-xl border border-[#e8ede6] bg-white shadow-[0_4px_18px_#243d2808] transition-[transform,box-shadow] duration-200 hover:-translate-y-[3px] hover:shadow-[0_12px_26px_#243d2814] ${view === "list" ? "min-h-[132px]" : ""}`}
+                  className={`bookmark-enter group relative min-w-0 rounded-xl border border-[#e8ede6] bg-white shadow-[0_4px_18px_#243d2808] transition-[transform,box-shadow] duration-200 hover:-translate-y-[3px] hover:shadow-[0_12px_26px_#243d2814] ${view === "list" ? "min-h-[132px]" : ""}`}
                   key={bookmark.id}
+                  style={{ animationDelay: `${Math.min(index, 8) * 45}ms` }}
                 >
                   <a
                     className={`group/link flex h-full overflow-hidden rounded-[inherit] text-inherit no-underline focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-[#a6c8a6] ${view === "list" ? "flex-row" : "flex-col"}`}
